@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Shift Rotation - Template & CSV</title>
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <style>
+    :root{
+      --pulse-ease: cubic-bezier(.4,0,.2,1);
+    }
+    body { font-family: Arial, sans-serif; margin: 18px; }
+    h2 { margin-top: 0; }
+    .row { margin-bottom: 12px; }
+    label { margin-right: 8px; }
+    input[type="date"], input[type="text"], input[type="file"], button { margin-right: 8px; }
+    #daysCount { font-weight: bold; margin-left: 8px; }
+    #status { color: #333; margin-top: 8px; }
+    .note { color: #555; font-size: 0.95em; margin-top:6px; }
+    a.sop-link { display:inline-block; margin-top:8px; color:#0a66c2; text-decoration:underline; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .small { font-size:0.9em; color:#555; }
+
+    /* Smooth, gradual flashing */
+    @keyframes softPulse {
+      0% { opacity: 1; }
+      50% { opacity: 0.18; }
+      100% { opacity: 1; }
+    }
+
+    /* Red delete-warning (4s) */
+    #deleteWarning {
+      display: none;
+      color: #b30000;
+      font-size: 1.39rem;
+      font-weight: 700;
+      text-align: center;
+      margin-top: 18px;
+      padding: 12px;
+      border-radius: 6px;
+      background: rgba(179,0,0,0.04);
+      line-height: 1.25;
+      white-space: pre-wrap;
+      animation: softPulse 4s var(--pulse-ease) infinite;
+    }
+
+    /* Yellow CSV warning (3s) */
+    #csvWarning {
+      display: none;
+      color: #b38f00;
+      font-weight: 700;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: rgba(255, 215, 0, 0.15);
+      animation: softPulse 3s var(--pulse-ease) infinite;
+    }
+  </style>
+</head>
+<body>
+  <h2>Shift Rotation — Template & CSV Generator</h2>
+
+  <!-- Browser recommendation -->
+  <p class="note">For the best experience, please use the latest versions of Google Chrome or Microsoft Edge.</p>
+
+  <!-- SOP link + green helper text -->
+  <div class="row">
+    <a class="sop-link" href="https://pmts365-my.sharepoint.com/:w:/g/personal/venugopal_veeraghanta_pmts_co_in/Ees4ErLxGJdCjJTC_mjtZxgBr48auQqdIe5NWyMPTQsOyA?e=nkUKi0" target="_blank" rel="noopener noreferrer">
+      Standard Operating Procedure (SOP)
+    </a>
+    <span style="margin-left:12px;color:green;font-weight:600;">
+      Please refer to the SOP if it is your first time using this page, or if you have questions or need assistance.
+    </span>
+  </div>
+
+  <!-- Site + Update Mode -->
+  <div class="row">
+    <label for="siteName">Site/Project Name:</label>
+    <input id="siteName" type="text" placeholder="Enter site/project name" list="siteList" />
+    <datalist id="siteList"></datalist>
+
+    <label style="margin-left:18px">
+      <input id="updateMode" type="checkbox" />
+      Are you updating the shift details?
+    </label>
+  </div>
+
+  <!-- Template download -->
+  <div class="row">
+    <h3>1) Download Shift Input Template</h3>
+    <label for="fromDate">From Date:</label>
+    <input id="fromDate" type="date" />
+    <span id="daysCount"></span>
+    <label for="toDate" style="margin-left:12px;">To Date:</label>
+    <input id="toDate" type="date" />
+    <button id="downloadTemplateBtn" style="margin-left:12px">Download Template</button>
+    <div class="note">The maximum allowed date range for selection is 35 days.</div>
+  </div>
+
+  <!-- Upload and prepare CSV -->
+  <div class="row">
+    <h3>2) Upload Filled Template (then press Download CSV)</h3>
+    <input id="inputFile" type="file" accept=".xlsx,.xls" />
+    <button id="downloadCsvBtn" disabled>Download CSV</button>
+    <!-- Yellow flashing CSV note (3s) -->
+    <span id="csvWarning" aria-live="polite">⚠️ !!Do not open the CSV file in Excel — use Notepad if you want to view the details!!</span>
+    <div id="status" class="small"></div>
+    <div class="note">After upload, the file is parsed and CSVs are prepared in memory. Click "Download CSV" to save the normal CSV. If "Are you updating..." is checked, you will be prompted to save the update CSV as well.</div>
+  </div>
+
+  <!-- Red delete-warning -->
+  <div id="deleteWarning" aria-live="polite"></div>
+
+<script>
+/* ---------------------- State ---------------------- */
+let prepared = {
+  normalRows: null,
+  updateRows: null,
+  normalCSV: null,
+  updateCSV: null,
+  normalDefaultName: null,
+  updateDefaultName: null
+};
+
+// NEW: track how many GENERAL cells were skipped (adds, doesn't remove anything)
+let skippedGeneral = 0;
+
+/* ---------------------- Utilities ---------------------- */
+function updateSiteDatalist() {
+  const dl = document.getElementById('siteList');
+  dl.innerHTML = '';
+  const arr = JSON.parse(localStorage.getItem('siteNameHistory') || '[]');
+  arr.forEach(s => {
+    const o = document.createElement('option');
+    o.value = s;
+    dl.appendChild(o);
+  });
+}
+
+function pushSiteHistory(name) {
+  if (!name) return;
+  let arr = JSON.parse(localStorage.getItem('siteNameHistory') || '[]');
+  if (!arr.includes(name)) {
+    arr.push(name);
+    localStorage.setItem('siteNameHistory', JSON.stringify(arr));
+    updateSiteDatalist();
+  }
+}
+
+function formatDateTemplate(d) {
+  const day = String(d.getDate()).padStart(2,'0');
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${day}-${months[d.getMonth()]}-${d.getFullYear()}`; // DD-MMM-YYYY
+}
+
+function mmddyyyy(d) {
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  const yyyy = d.getFullYear();
+  return `${mm}/${dd}/${yyyy}`;
+}
+
+function parseTemplateHeaderDate(text) {
+  if (!text) return null;
+  if (Object.prototype.toString.call(text) === '[object Date]') return text;
+  const parts = String(text).trim().split('-');
+  if (parts.length !== 3) return null;
+  const dd = parseInt(parts[0], 10);
+  const mon = parts[1];
+  let ystr = parts[2];
+  let y = parseInt(ystr, 10);
+  if (String(ystr).length === 2) y += 2000;
+  const mkey = typeof mon === 'string' ? (mon.charAt(0).toUpperCase() + mon.slice(1).toLowerCase()) : mon;
+  const monthMap = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:6,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+  // ^ (Fixed below to correct months) — see next line:
+}
+
+</script>
+<script>
+/* Correct month map (the above block is left intact to avoid removing code; we re-define safely here) */
+function parseTemplateHeaderDate(text) {
+  if (!text) return null;
+  if (Object.prototype.toString.call(text) === '[object Date]') return text;
+  const parts = String(text).trim().split('-');
+  if (parts.length !== 3) return null;
+  const dd = parseInt(parts[0], 10);
+  const mon = parts[1];
+  let ystr = parts[2];
+  let y = parseInt(ystr, 10);
+  if (String(ystr).length === 2) y += 2000;
+  const mkey = typeof mon === 'string' ? (mon.charAt(0).toUpperCase() + mon.slice(1).toLowerCase()) : mon;
+  const monthMap = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+  const m = monthMap[mkey];
+  if (isNaN(dd) || isNaN(y) || m === undefined) return null;
+  const dt = new Date(y, m, dd);
+  return isNaN(dt) ? null : dt;
+}
+
+function digitsOnly(s) { return String(s).replace(/\D/g, ''); }
+
+function arrayToCSV(rows) {
+  return rows.map(row => row.map(cell => {
+    const v = (cell === undefined || cell === null) ? '' : String(cell);
+    if (v.includes(',') || v.includes('"') || v.includes('\n')) return `"${v.replace(/"/g,'""')}"`;
+    return v;
+  }).join(',')).join('\r\n');
+}
+
+/* ---------------------- Warnings visibility ---------------------- */
+function updateDeleteWarningVisibility() {
+  const delEl = document.getElementById('deleteWarning');
+  const csvWarn = document.getElementById('csvWarning');
+  // Yellow CSV warning shows only when a normal CSV is prepared (button enabled)
+  csvWarn.style.display = (prepared && prepared.normalCSV) ? 'inline-block' : 'none';
+
+  // Red delete warning (only when update mode is ON and files have been prepared)
+  const doUpdate = document.getElementById('updateMode').checked;
+  if (doUpdate && prepared && prepared.updateDefaultName && prepared.normalDefaultName) {
+    const msg =
+      `!! Upload the ${prepared.updateDefaultName} before importing the updated shift details from ${prepared.normalDefaultName} !!\n\n` +
+      `Uploading only one of these files will result in errors, and the shift details will not be updated. Please upload both files.`;
+    delEl.textContent = msg;
+    delEl.style.display = 'block';
+  } else {
+    delEl.style.display = 'none';
+    delEl.textContent = '';
+  }
+}
+
+/* ---------------------- Init ---------------------- */
+document.addEventListener('DOMContentLoaded', function() {
+  updateSiteDatalist();
+  const saved = localStorage.getItem('siteName');
+  if (saved) document.getElementById('siteName').value = saved;
+
+  const today = new Date();
+  document.getElementById('fromDate').value = today.toISOString().slice(0,10);
+  const to = new Date(today); to.setDate(to.getDate()+29);
+  document.getElementById('toDate').value = to.toISOString().slice(0,10);
+  updateDaysCount();
+});
+
+document.getElementById('siteName').addEventListener('input', function(e) {
+  pushSiteHistory(e.target.value.trim());
+  localStorage.setItem('siteName', e.target.value.trim());
+});
+
+/* ---------------------- Days count & limits ---------------------- */
+document.getElementById('fromDate').addEventListener('change', function() {
+  const fromStr = this.value;
+  if (!fromStr) { document.getElementById('daysCount').textContent = ''; return; }
+  const f = new Date(fromStr);
+  const t = new Date(f); t.setDate(f.getDate()+29);
+  document.getElementById('toDate').value = t.toISOString().slice(0,10);
+  updateDaysCount();
+});
+document.getElementById('toDate').addEventListener('change', updateDaysCount);
+
+function updateDaysCount() {
+  const fstr = document.getElementById('fromDate').value;
+  const tstr = document.getElementById('toDate').value;
+  if (!fstr || !tstr) { document.getElementById('daysCount').textContent = ''; return; }
+  const f = new Date(fstr), t = new Date(tstr);
+  if (isNaN(f) || isNaN(t) || f > t) { document.getElementById('daysCount').textContent = ''; return; }
+  const diffInclusive = Math.floor((t - f) / (1000*60*60*24)) + 1;
+  if (diffInclusive > 35) {
+    alert('The maximum allowed date range for selection is 35 days.');
+    const adj = new Date(f); adj.setDate(f.getDate()+34); // 35 days inclusive
+    document.getElementById('toDate').value = adj.toISOString().slice(0,10);
+    document.getElementById('daysCount').textContent = `Days: ${35}`;
+    return;
+  }
+  document.getElementById('daysCount').textContent = `Days: ${diffInclusive}`;
+}
+
+/* ---------------------- Download Template ---------------------- */
+document.getElementById('downloadTemplateBtn').addEventListener('click', async function() {
+  const site = document.getElementById('siteName').value.trim();
+  if (!site) { alert('Site name is required!'); document.getElementById('siteName').focus(); return; }
+
+  const fromStr = document.getElementById('fromDate').value;
+  const toStr = document.getElementById('toDate').value;
+  if (!fromStr || !toStr) { alert('Please enter both From Date and To Date.'); return; }
+  const f = new Date(fromStr), t = new Date(toStr);
+  if (isNaN(f) || isNaN(t) || f > t) { alert('Invalid date range.'); return; }
+  const diffInclusive = Math.floor((t - f) / (1000*60*60*24)) + 1;
+  if (diffInclusive > 35) { alert('The maximum allowed date range for selection is 35 days.'); return; }
+
+  // Build headers row
+  const headers = ['Sl.No', 'EmployeeCode', 'Employee Name'];
+  for (let i = 0; i < diffInclusive; i++) {
+    const dateObj = new Date(f);
+    dateObj.setDate(f.getDate() + i);
+    headers.push(formatDateTemplate(dateObj));
+  }
+
+  // Title row
+  const monthNamesFull = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const titleText = `Shift Rotation ${site} - ${monthNamesFull[f.getMonth()]} - ${f.getFullYear()}`;
+
+  // Worksheet data
+  const wsData = [
+    [titleText],
+    headers,
+    Array(headers.length).fill('')
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
+  XLSX.utils.book_append_sheet(wb, ws, "Template");
+
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  const dateStr = `${yyyy}${mm}${dd}`;
+  const defaultFileName = `${site}_ShiftInputTemplate_${dateStr}.xlsx`;
+
+  // Save (fallback-friendly)
+  if ('showSaveFilePicker' in window) {
+    try {
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const handle = await window.showSaveFilePicker({
+        suggestedName: defaultFileName,
+        types: [{ description: 'Excel file', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      alert('Template saved successfully.');
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      XLSX.writeFile(wb, defaultFileName);
+      alert('Template saved (fallback).');
+    }
+  } else {
+    XLSX.writeFile(wb, defaultFileName);
+    alert('Template saved.');
+  }
+});
+
+/* ---------------------- CSV preparation on upload ---------------------- */
+document.getElementById('inputFile').addEventListener('change', function(evt) {
+  document.getElementById('status').textContent = '';
+  prepared = { normalRows:null, updateRows:null, normalCSV:null, updateCSV:null, normalDefaultName:null, updateDefaultName:null };
+  document.getElementById('downloadCsvBtn').disabled = true;
+  updateDeleteWarningVisibility();
+
+  // NEW: reset counter each upload (adds, does not remove any existing logic)
+  skippedGeneral = 0;
+
+  const site = document.getElementById('siteName').value.trim();
+  if (!site) { alert('Site name is required!'); this.value=''; return; }
+
+  const file = evt.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: 'array' });
+      const sheetName = wb.SheetNames[0];
+      const ws = wb.Sheets[sheetName];
+
+      const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+
+      if (allRows.length < 3) {
+        alert('Template appears empty or invalid (must contain title, header row and at least one data row).');
+        evt.target.value = '';
+        return;
+      }
+
+      const headersRow = allRows[1];
+      if (!headersRow || headersRow.length < 4) {
+        alert('Template header row is missing or incomplete (need at least D2 onward dates).');
+        evt.target.value = '';
+        return;
+      }
+
+      const firstDateColIndex = 3; // Column D (0-based)
+      const dateHeaders = headersRow.slice(firstDateColIndex);
+      if (dateHeaders.length === 0) {
+        alert('No date columns found in the template (D2 onward).');
+        evt.target.value = '';
+        return;
+      }
+
+      const dateObjs = dateHeaders.map(h => parseTemplateHeaderDate(h));
+      if (dateObjs.some(d => d === null)) {
+        alert('Could not parse one or more date headers. Expected format: DD-MMM-YYYY (e.g., 08-Aug-2025).');
+        evt.target.value = '';
+        return;
+      }
+
+      const allowedDayModels = ['GENERAL','WO','B','A','C'];
+
+      /* ---- CSV header block (TWO rows) — applied to BOTH normal and update CSVs ---- */
+      const headerBlock = [
+        ['[OPERATOR]','userId','startDate','endDate','workSchedule.externalCode','comment','dayModel.externalCode','externalCode','category','holidayCalendar.externalCode'],
+        ['Supported operators: Delimit, Clear and Delete','User','Start Date','End Date','Work Schedule.External Code','Comment','Work Schedule Day Model.External Code','External Code','Category (Valid values: WORK_SCHEDULE / HOLIDAY_CALENDAR)','Holiday Calendar.External Code']
+      ];
+
+      const normalRows = headerBlock.map(r => r.slice());
+      const updateRows = headerBlock.map(r => r.slice());
+
+      // Data rows
+      for (let r = 2; r < allRows.length; r++) {
+        const row = allRows[r];
+        if (!row || row.length === 0) continue;
+
+        const userId = (row[1] || '').toString().trim(); // EmployeeCode (Column B)
+        if (!userId) continue;
+
+        for (let i = 0; i < dateObjs.length; i++) {
+          const dateObj = dateObjs[i];
+          if (!dateObj) continue;
+
+          const cellValRaw = (row[firstDateColIndex + i] || '').toString().trim();
+          if (!cellValRaw) continue;
+
+          const shiftCode = cellValRaw.toUpperCase();
+          if (!allowedDayModels.includes(shiftCode)) {
+            alert(`Invalid shift code "${cellValRaw}" for user "${userId}" on date "${dateHeaders[i]}". Allowed: GENERAL, WO, B, A, C.\nCSV generation aborted.`);
+            evt.target.value = '';
+            prepared = { normalRows:null, updateRows:null, normalCSV:null, updateCSV:null, normalDefaultName:null, updateDefaultName:null };
+            document.getElementById('downloadCsvBtn').disabled = true;
+            updateDeleteWarningVisibility();
+            return;
+          }
+
+          // NEW: Skip GENERAL shift entirely (no rows in either CSV)
+          if (shiftCode === 'GENERAL') {
+            skippedGeneral++;
+            continue;
+          }
+
+          const formattedDateCSV = mmddyyyy(dateObj); // MM/DD/YYYY
+          const perDayDigits = digitsOnly(formattedDateCSV); // MMDDYYYY
+          const externalCode = `${userId}${perDayDigits}${perDayDigits}`; // user + start + end
+
+          // Normal CSV row (with dayModel)
+          normalRows.push([
+            '',               // [OPERATOR] blank
+            userId,           // userId
+            formattedDateCSV, // startDate
+            formattedDateCSV, // endDate
+            '',               // workSchedule.externalCode
+            '',               // comment
+            shiftCode,        // dayModel.externalCode
+            externalCode,     // externalCode
+            '',               // category
+            ''                // holidayCalendar.externalCode
+          ]);
+
+          // Update CSV row (Delete, dayModel blank)
+          updateRows.push([
+            'Delete',
+            userId,
+            formattedDateCSV,
+            formattedDateCSV,
+            '',
+            '',
+            '',               // dayModel blank
+            externalCode,
+            '',
+            ''
+          ]);
+        }
+      }
+
+      if (normalRows.length <= 2) {
+        alert('No data rows found to export (are the daily shift cells filled?).');
+        evt.target.value = '';
+        return;
+      }
+
+      // Convert to CSV strings (BOTH include the header block)
+      const normalCSV = arrayToCSV(normalRows);
+      const updateCSV = arrayToCSV(updateRows);
+
+      // Filenames
+      const now = new Date();
+      const base = `${document.getElementById('siteName').value.trim() || 'Site'}_ShiftRotation_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_SFUpload`;
+      const defName = `${base}.csv`;
+      const updateName = `update_${base}(delete).csv`;
+
+      // Store
+      prepared.normalRows = normalRows;
+      prepared.updateRows = updateRows;
+      prepared.normalCSV = normalCSV;
+      prepared.updateCSV = updateCSV;
+      prepared.normalDefaultName = defName;
+      prepared.updateDefaultName = updateName;
+
+      document.getElementById('downloadCsvBtn').disabled = false;
+      document.getElementById('status').textContent = `Prepared CSV with ${normalRows.length - 2} data rows. Click "Download CSV" to save.`;
+
+      // NEW: Append info about GENERAL cells skipped (adds line, doesn't replace)
+      if (skippedGeneral > 0) {
+        document.getElementById('status').textContent += ` (skipped ${skippedGeneral} GENERAL cell${skippedGeneral>1?'s':''})`;
+      }
+
+      updateDeleteWarningVisibility();
+
+    } catch (err) {
+      console.error(err);
+      alert('Unexpected error while parsing the file. See console for details.');
+      evt.target.value = '';
+      document.getElementById('downloadCsvBtn').disabled = true;
+      prepared = { normalRows:null, updateRows:null, normalCSV:null, updateCSV:null, normalDefaultName:null, updateDefaultName:null };
+      updateDeleteWarningVisibility();
+    }
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+/* ---------------------- Update checkbox listener ---------------------- */
+document.getElementById('updateMode').addEventListener('change', function() {
+  updateDeleteWarningVisibility();
+});
+
+/* ---------------------- Download CSVs ---------------------- */
+document.getElementById('downloadCsvBtn').addEventListener('click', async function() {
+  if (!prepared || !prepared.normalCSV) { alert('No prepared CSV available. Upload the filled template first.'); return; }
+
+  const normalBlob = new Blob([prepared.normalCSV], { type:'text/csv;charset=utf-8;' });
+  const updateBlob = prepared.updateCSV ? new Blob([prepared.updateCSV], { type:'text/csv;charset=utf-8;' }) : null;
+  const normalSuggested = prepared.normalDefaultName;
+  const updateSuggested = prepared.updateDefaultName;
+
+  async function saveFileWithPicker(blob, suggestedName) {
+    if ('showSaveFilePicker' in window) {
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [{ description:'CSV file', accept: {'text/csv': ['.csv']} }]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return handle.name || suggestedName;
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = suggestedName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      return suggestedName;
+    }
+  }
+
+  try {
+    const savedName = await saveFileWithPicker(normalBlob, normalSuggested);
+
+    if (document.getElementById('updateMode').checked && updateBlob) {
+      await saveFileWithPicker(updateBlob, updateSuggested);
+      alert(`Saved: ${savedName} and ${updateSuggested}`);
+    } else {
+      alert(`Saved: ${savedName}`);
+    }
+
+    // Reset state
+    prepared = { normalRows:null, updateRows:null, normalCSV:null, updateCSV:null, normalDefaultName:null, updateDefaultName:null };
+    document.getElementById('downloadCsvBtn').disabled = true;
+    document.getElementById('status').textContent = 'CSV saved.';
+    document.getElementById('inputFile').value = '';
+    updateDeleteWarningVisibility();
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      alert('Save cancelled.');
+    } else {
+      console.error(err);
+      alert('An error occurred while saving the CSV(s). See console for details.');
+    }
+  }
+});
+</script>
+</body>
+</html>
